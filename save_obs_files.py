@@ -43,12 +43,14 @@ def script_update(s):
     global vid_total
     global vid_count
     global camera_id
+    global week
+    global day
 
     vid_total = obs.obs_data_get_int(s, "vid_total")
     vid_count = obs.obs_data_get_int(s, "vid_count")
     camera_id = obs.obs_data_get_int(s, "camera_id")
-    camera_id = obs.obs_data_get_int(s, "week")
-    camera_id = obs.obs_data_get_int(s, "day")
+    week = obs.obs_data_get_int(s, "week")
+    day = obs.obs_data_get_int(s, "day")
 
 
 # gets the ISO timestamp
@@ -62,9 +64,9 @@ def iso_stamp():
 
 # main function basically
 def on_event(e):
-    if e == obs.OBS_FRONTEND_EVENT_vid_countORDING_STOPPED:
+    if e == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED:
         # raw output file (unformatted)
-        src = obs.obs_frontend_get_last_vid_countording()
+        src = obs.obs_frontend_get_last_recording()
 
         # checks if our last file path was incorrectly formatted 
         if not src:
