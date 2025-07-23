@@ -1,10 +1,12 @@
 import os
 import time
+from datetime import datetime, timezone
+from pathlib import Path
+import shutil
 
 # this only works when you load it on obs wont work on vscode for example
 import obspython as obs
-from datetime import datetime
-from pathlib import Path
+
 
 # default values
 vid_total = 1
@@ -12,19 +14,33 @@ vid_count = 1
 camera_id = 1
 week = 0
 day = 0
+log_file = None
+frame_idx = 0
+start_ns = 0
 
 # Sleap Logger function
 def logging_event(e):
-    global start_ns, log_file, frame_idx
+    global start_ns
+    global log_file
+    global frame_idx
+
     if e == obs.OBS_FRONTEND_EVENT_RECORDING_STARTED:
+        
+        log_path = generate_log_path()
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+        log_file = open(log_path, "w")
         start_ns = time.monotonic_ns()
         frame_idx = 0
-        log_path = generate_log_path()
-        if log_path:
-            log_file = open(log_path, "w")
-            log_file.write("frame,timestamp_ms\n")
+        log_file.write("frame,timestamp_ms\n")
+        
     elif e == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED:
         close_log()
+
+# Helper function for the on_tick function
+def _fps():
+    vi = obs.obs_video_info()
+    return vi.fps_num / vi.fps_den if vi.fps_den else 30.0
 
 # Logs the current frame index and knows the time in miliseconds
 # since the recording started. Uses both of these to write lines
@@ -35,25 +51,55 @@ def on_tick():
 
     if log_file is None:
         return
+    
     fps = _fps()
     # True frame locked logging for the sleap csv we are making
     elapsed_ms = int(frame_idx * (1000 / fps))
     log_file.write(f"{frame_idx},{elapsed_ms}\n")
     frame_idx += 1
 
-# Helper function for the on_tick function
-def _fps():
-    vi = obs.obs_video_info()
-    return vi.fps_num / vi.fps_den if vi.fps_den else 30.0
+
+def get_output_directory():
+    # grabs obs settings for the output
+    output = obs.obs_frontend_get_recording_output()
+    if not output:
+        return None
+    
+    # grabs obs output settings (this is different from the last one trust me)
+    settings = obs.obs_output_get_settings(output)
+    if not settings:
+        obs.obs_output_release(output)
+        return None
+
+    # Get the full output path from OBS settings (this might be a full path to .mp4)
+    full_path = obs.obs_data_get_string(settings, "path")
+
+    # Clean up memory
+    obs.obs_data_release(settings)
+    obs.obs_output_release(output)
+
+    # Make sure we return only the directory
+    output_dir = os.path.dirname(full_path) if full_path.endswith(".mp4") else full_path
+    return output_dir
+
+
 
 # generates the path that the csv file gets saved to
 def generate_log_path():
-    output_path = obs.obs_frontend_get_recording_filename()
-    if not output_path:
+    src = obs.obs_frontend_get_last_recording()
+    if not src:
         return None
+
+    p = Path(src)
+    base_dir = p.parent
+
+    log_dir = base_dir / f"W{week}" / f"D{day}" / "vid" / "video_log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # identical to the videos basically but for logs
+    log_name = f"L{camera_id}_W{week}D{day}_REC{vid_count}-{vid_total}_{iso_stamp()}.csv"
     
-    directory = os.path.dirname(output_path)
-    return os.path.join(directory, f"C{camera_id}_W{week}D{day}_REC{vid_count}-{vid_total}_{iso_stamp()}")
+    return log_dir / log_name
 
 # closes and ends logging to the csv when recording is stopped / OBS closed
 def close_log():
@@ -73,7 +119,7 @@ def script_properties():
 
     # Week and Day Selection (for now only 4 weeks, 5 days in a week, go 0 for testing)
     obs.obs_properties_add_int(p, "week", "Week number", 0, 4, 1)
-    obs.obs_properties_add_int(p, "day", "Day number", 0, 5, 1)
+    obs.obs_properties_add_int(p, "day", "Day number", 1, 5, 1)
 
     return p
 
@@ -84,7 +130,7 @@ def script_defaults(s):
     obs.obs_data_set_default_int(s, "vid_count", 1)
     obs.obs_data_set_default_int(s, "camera_id", 1)
     obs.obs_data_set_default_int(s, "week", 0)
-    obs.obs_data_set_default_int(s, "day", 0)
+    obs.obs_data_set_default_int(s, "day", 1)
 
 
 
@@ -102,14 +148,15 @@ def script_update(s):
     week = obs.obs_data_get_int(s, "week")
     day = obs.obs_data_get_int(s, "day")
 
+# Seema Number
+MEINBERG_DELTA = 1752160362
 
-# gets the ISO timestamp
+# returns the ISO stamp at moment of call
 def iso_stamp():
-    # gets local computer time
-    t = datetime.now().astimezone()
-
-    # returns ISO with milisecond included with timezone in Z (UTC) time
-    return f"{t.strftime('%Y-%m-%dT%H_%M_%S')}_{t.microsecond//1000:03d}Z"
+    real_time = MEINBERG_DELTA + time.time()
+    pst_time = real_time - (8 * 3600)  # manually subtract 8 hours for PST (Cali Time)
+    local_time = datetime.fromtimestamp(pst_time, tz=timezone.utc)  # explicitly UTC
+    return f"{local_time.strftime('%Y-%m-%dT%H_%M_%S')}_{local_time.microsecond // 1000:03d}-PST"
 
 
 # main function for formatting basically
@@ -124,8 +171,15 @@ def formatting_event(e):
         
         # Makes the new file with our standard format
         p = Path(src)
+        base_dir = p.parent
+
+        # make the subfolder W#/D#
+        subfolder = Path(f"W{week}") / f"D{day}" / "vid"
+        target_dir = base_dir / subfolder
+        target_dir.mkdir(parents=True, exist_ok=True)
+
         base_fp = f"C{camera_id}_W{week}D{day}_REC{vid_count}-{vid_total}_{iso_stamp()}"
-        new_file = p.with_name(f"{base_fp}{p.suffix}")
+        new_file = target_dir / f"{base_fp}{p.suffix}"
 
         # makes sure we have no collision
         if new_file.exists():
@@ -133,13 +187,14 @@ def formatting_event(e):
             return
         
         # renames the raw output file to what we want (the new_file variable)
-        os.rename(src, new_file)
+        shutil.move(str(p), str(new_file))
+
 
 # starts the code above
 def script_load(s):
     obs.timer_add(on_tick, 0)
-    obs.obs_frontend_add_event_callback(logging_event)
     obs.obs_frontend_add_event_callback(formatting_event)
+    obs.obs_frontend_add_event_callback(logging_event)
 
 # safely unloads scripts and calls close logs when obs is closed or recording ends
 def script_unload():
